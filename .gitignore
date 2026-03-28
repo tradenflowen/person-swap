@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pth
+*.ckpt
+*.safetensors
+.env
+node_modules/
+.next/
+venv/
+*.mp4
+*.avi
+*.mov
+hf_cache/
+outputs/
