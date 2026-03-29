@@ -1,0 +1,505 @@
+"""
+setup_kaggle.py  —  Person-Swap Pipeline: Kaggle Environment Bootstrap
+=======================================================================
+Run this as the FIRST cell in every new Kaggle session.
+
+What it does:
+  1. Clones the person-swap repo
+  2. Clones all external GitHub repos that provide pipeline Python code
+  3. pip-installs all required packages
+  4. Downloads all model checkpoints (skips if already present)
+  5. Adds all required paths to sys.path
+  6. Prints a readiness report so you know exactly what is ready
+
+Usage:
+  exec(open("/kaggle/working/setup_kaggle.py").read())
+  -- OR --
+  %run /kaggle/working/setup_kaggle.py
+
+After this runs, you can import any pipeline module directly:
+  from pipeline.segment import segment_video
+  from pipeline.pose import load_dwpose
+  ... etc
+"""
+
+import os
+import sys
+import subprocess
+import time
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+WORK_DIR   = "/kaggle/working"
+REPO_DIR   = f"{WORK_DIR}/person-swap"
+CKPT_DIR   = f"{REPO_DIR}/checkpoints"
+EXT_DIR    = f"{WORK_DIR}/external"          # external GitHub repos land here
+
+# ── Your repo ─────────────────────────────────────────────────────────────────
+PERSON_SWAP_REPO = "https://github.com/tradenflowen/person-swap.git"
+
+# ── External GitHub repos needed for pipeline Python code ─────────────────────
+# Each entry: (clone_url, local_folder_name, subfolder_to_add_to_sys_path)
+# subfolder="" means add the root of the clone to sys.path
+EXTERNAL_REPOS = [
+    (
+        "https://github.com/facebookresearch/segment-anything-2.git",
+        "sam2",
+        ""          # sam2 package is at repo root
+    ),
+    (
+        "https://github.com/InstantX/InstantID.git",
+        "InstantID",
+        ""          # pipeline_stable_diffusion_xl_instantid.py is at root
+    ),
+    (
+        "https://github.com/AIRI-Institute/HairFastGAN.git",
+        "HairFastGAN",
+        ""          # hair_swap.py is at root
+    ),
+    (
+        "https://github.com/levihsu/OOTDiffusion.git",
+        "OOTDiffusion",
+        ""          # pipelines/ folder is at root
+    ),
+    (
+        "https://github.com/princeton-vl/RAFT.git",
+        "RAFT",
+        "core"      # raft module lives in core/
+    ),
+    (
+        "https://github.com/sczhou/ProPainter.git",
+        "ProPainter",
+        ""          # model/ is at root
+    ),
+    (
+        "https://github.com/hzwer/ECCV2022-RIFE.git",
+        "RIFE",
+        ""          # model/ is at root
+    ),
+]
+
+# ── pip packages ───────────────────────────────────────────────────────────────
+PIP_PACKAGES = [
+    # SAM2
+    "hydra-core",
+    "iopath",
+    # Pose
+    "mediapipe",
+    # InsightFace / face stage
+    "insightface",
+    "onnxruntime-gpu",
+    # Diffusers stack
+    "diffusers>=0.25.0",
+    "transformers>=4.36.0",
+    "accelerate",
+    "safetensors",
+    # HairFastGAN deps
+    "ninja",
+    "scipy",
+    "scikit-image",
+    # Upscale
+    "realesrgan",
+    "basicsr",
+    # General
+    "opencv-python-headless",
+    "Pillow",
+    "numpy",
+    "huggingface_hub",
+    "einops",
+    "timm",
+]
+
+# ── Model checkpoints to download ─────────────────────────────────────────────
+# Each entry: (hf_repo_id, filename_or_None, local_subdir)
+# filename=None means snapshot_download (entire repo)
+CHECKPOINTS = [
+    # SAM2
+    (
+        None,   # direct URL download, handled separately
+        "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_small.pt",
+        "sam2_hiera_small.pt"
+    ),
+    # MediaPipe pose — also a direct URL, handled separately
+    (
+        None,
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task",
+        "pose_landmarker.task"
+    ),
+    # InstantID
+    (
+        "hf",
+        "InstantX/InstantID",
+        "ip-adapter.bin",
+        "instantid"
+    ),
+    (
+        "hf",
+        "InstantX/InstantID",
+        "ControlNetModel/config.json",
+        "instantid"
+    ),
+    (
+        "hf",
+        "InstantX/InstantID",
+        "ControlNetModel/diffusion_pytorch_model.safetensors",
+        "instantid"
+    ),
+    # HairFastGAN weights (snapshot — code comes from GitHub clone)
+    (
+        "hf_snapshot",
+        "AIRI-Institute/HairFastGAN",
+        "hairfastgan"
+    ),
+    # GPEN skin enhancer
+    (
+        "hf",
+        "akhaliq/GPEN",
+        "GPEN-BFR-512.pth",
+        "gpen"
+    ),
+    # Real-ESRGAN
+    (
+        "hf",
+        "ai-forever/Real-ESRGAN",
+        "RealESRGAN_x4plus.pth",
+        "realesrgan"
+    ),
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run(cmd, desc="", check=True):
+    """Run a shell command, print result."""
+    print(f"  → {desc or cmd[:80]}")
+    result = subprocess.run(
+        cmd, shell=True,
+        capture_output=True, text=True
+    )
+    if result.returncode != 0 and check:
+        print(f"  ✗ FAILED:\n{result.stderr[-1000:]}")
+    elif result.returncode != 0:
+        print(f"  ⚠ Non-zero exit (non-fatal):\n{result.stderr[-400:]}")
+    return result.returncode == 0
+
+
+def add_path(p):
+    if p not in sys.path and os.path.isdir(p):
+        sys.path.insert(0, p)
+        return True
+    return False
+
+
+STATUS = {}   # populated at end for readiness report
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 1 — Clone / update person-swap repo
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step_clone_repo():
+    print("\n[1/5] person-swap repo")
+    if os.path.isdir(REPO_DIR):
+        print("  Already cloned — pulling latest...")
+        run(f"git -C {REPO_DIR} pull --ff-only", "git pull")
+    else:
+        ok = run(
+            f"git clone {PERSON_SWAP_REPO} {REPO_DIR}",
+            "git clone person-swap"
+        )
+        STATUS["repo"] = ok
+        if not ok:
+            return
+
+    STATUS["repo"] = os.path.isdir(f"{REPO_DIR}/pipeline")
+    add_path(REPO_DIR)
+    add_path(f"{REPO_DIR}/pipeline")
+    os.makedirs(CKPT_DIR, exist_ok=True)
+    print(f"  ✓ Repo ready at {REPO_DIR}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 2 — Clone external repos
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step_clone_externals():
+    print("\n[2/5] External GitHub repos (pipeline code)")
+    os.makedirs(EXT_DIR, exist_ok=True)
+
+    for entry in EXTERNAL_REPOS:
+        clone_url, folder, subpath = entry
+        dest = f"{EXT_DIR}/{folder}"
+
+        if os.path.isdir(dest):
+            print(f"  {folder}: already present — skipping clone")
+        else:
+            ok = run(
+                f"git clone --depth 1 {clone_url} {dest}",
+                f"clone {folder}"
+            )
+            if not ok:
+                STATUS[f"ext_{folder}"] = False
+                continue
+
+        # Add to sys.path
+        path_to_add = dest if subpath == "" else f"{dest}/{subpath}"
+        added = add_path(path_to_add)
+        STATUS[f"ext_{folder}"] = os.path.isdir(path_to_add)
+        print(f"  ✓ {folder} → sys.path: {path_to_add}")
+
+    # OOTDiffusion needs its checkpoints subfolder wired into sys.path too
+    # so that `from pipelines.OOTDiffusion import ...` resolves
+    ootd_pipe = f"{EXT_DIR}/OOTDiffusion"
+    if os.path.isdir(ootd_pipe):
+        add_path(ootd_pipe)
+
+    # InstantID pipeline file needs to be visible at top level
+    instantid_dir = f"{EXT_DIR}/InstantID"
+    if os.path.isdir(instantid_dir):
+        add_path(instantid_dir)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — pip install
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step_pip_install():
+    print("\n[3/5] pip packages")
+
+    # Install SAM2 from its cloned repo (not PyPI)
+    sam2_dir = f"{EXT_DIR}/sam2"
+    if os.path.isdir(sam2_dir):
+        run(
+            f"pip install -e {sam2_dir} -q",
+            "pip install sam2 (from clone)"
+        )
+
+    # Install OOTDiffusion requirements if present
+    ootd_req = f"{EXT_DIR}/OOTDiffusion/requirements.txt"
+    if os.path.isfile(ootd_req):
+        run(f"pip install -r {ootd_req} -q", "OOTDiffusion requirements")
+
+    # Install HairFastGAN requirements if present
+    hair_req = f"{EXT_DIR}/HairFastGAN/requirements.txt"
+    if os.path.isfile(hair_req):
+        run(f"pip install -r {hair_req} -q", "HairFastGAN requirements")
+
+    # Main package list
+    pkg_str = " ".join(f'"{p}"' for p in PIP_PACKAGES)
+    run(f"pip install {pkg_str} -q", "core pip packages")
+
+    STATUS["pip"] = True
+    print("  ✓ pip installs complete")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 4 — Download checkpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step_download_checkpoints():
+    print("\n[4/5] Model checkpoints")
+    import urllib.request
+    try:
+        from huggingface_hub import hf_hub_download, snapshot_download
+    except ImportError:
+        print("  ✗ huggingface_hub not available — run pip step first")
+        return
+
+    for entry in CHECKPOINTS:
+        kind = entry[0]
+
+        # Direct URL downloads (SAM2 checkpoint, MediaPipe model)
+        if kind is None:
+            _, url, filename = entry
+            dest = f"{CKPT_DIR}/{filename}"
+            if os.path.isfile(dest):
+                print(f"  ✓ {filename}: already present")
+                continue
+            print(f"  Downloading {filename}...")
+            try:
+                urllib.request.urlretrieve(url, dest)
+                print(f"  ✓ {filename}: downloaded")
+            except Exception as e:
+                print(f"  ✗ {filename}: FAILED — {e}")
+
+        # HF single file download
+        elif kind == "hf":
+            _, repo_id, filename, subdir = entry
+            dest_dir = f"{CKPT_DIR}/{subdir}"
+            dest_file = f"{dest_dir}/{filename}"
+            if os.path.isfile(dest_file):
+                print(f"  ✓ {filename}: already present")
+                continue
+            os.makedirs(dest_dir, exist_ok=True)
+            print(f"  Downloading {filename} from {repo_id}...")
+            try:
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    local_dir=dest_dir
+                )
+                print(f"  ✓ {filename}: downloaded")
+            except Exception as e:
+                print(f"  ✗ {filename}: FAILED — {e}")
+
+        # HF snapshot (entire repo)
+        elif kind == "hf_snapshot":
+            _, repo_id, subdir = entry
+            dest_dir = f"{CKPT_DIR}/{subdir}"
+            if os.path.isdir(dest_dir) and os.listdir(dest_dir):
+                print(f"  ✓ {subdir} snapshot: already present")
+                continue
+            os.makedirs(dest_dir, exist_ok=True)
+            print(f"  Downloading {repo_id} snapshot (weights only)...")
+            try:
+                snapshot_download(repo_id=repo_id, local_dir=dest_dir)
+                print(f"  ✓ {subdir}: downloaded")
+            except Exception as e:
+                print(f"  ✗ {subdir}: FAILED — {e}")
+
+    STATUS["checkpoints"] = True
+    print("  ✓ Checkpoint step complete (check above for individual failures)")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 5 — Wire sys.path for pipeline modules
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step_wire_paths():
+    """
+    Ensures all import paths are set correctly for the pipeline.
+    Run this again if you restart the kernel without re-running the full setup.
+    """
+    print("\n[5/5] Wiring sys.path")
+
+    paths = [
+        REPO_DIR,
+        f"{REPO_DIR}/pipeline",
+        f"{EXT_DIR}/sam2",
+        f"{EXT_DIR}/InstantID",
+        f"{EXT_DIR}/HairFastGAN",
+        f"{EXT_DIR}/OOTDiffusion",
+        f"{EXT_DIR}/RAFT/core",
+        f"{EXT_DIR}/ProPainter",
+        f"{EXT_DIR}/RIFE",
+        # HairFastGAN weights snapshot path (for pretrained_models/)
+        f"{CKPT_DIR}/hairfastgan",
+        # GPEN code path
+        f"{CKPT_DIR}/gpen",
+    ]
+
+    for p in paths:
+        if os.path.isdir(p):
+            add_path(p)
+            print(f"  ✓ {p}")
+        else:
+            print(f"  ⚠ Not found (may not be cloned yet): {p}")
+
+    STATUS["paths"] = True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Readiness report
+# ══════════════════════════════════════════════════════════════════════════════
+
+def print_report():
+    print("\n" + "="*55)
+    print("  ENVIRONMENT READINESS REPORT")
+    print("="*55)
+
+    checks = [
+        ("person-swap repo",    STATUS.get("repo", False)),
+        ("SAM2 clone",          STATUS.get("ext_sam2", False)),
+        ("InstantID clone",     STATUS.get("ext_InstantID", False)),
+        ("HairFastGAN clone",   STATUS.get("ext_HairFastGAN", False)),
+        ("OOTDiffusion clone",  STATUS.get("ext_OOTDiffusion", False)),
+        ("RAFT clone",          STATUS.get("ext_RAFT", False)),
+        ("ProPainter clone",    STATUS.get("ext_ProPainter", False)),
+        ("RIFE clone",          STATUS.get("ext_RIFE", False)),
+        ("pip packages",        STATUS.get("pip", False)),
+        ("checkpoints",         STATUS.get("checkpoints", False)),
+        ("sys.path wired",      STATUS.get("paths", False)),
+    ]
+
+    all_ok = True
+    for label, ok in checks:
+        icon = "✓" if ok else "✗"
+        print(f"  {icon}  {label}")
+        if not ok:
+            all_ok = False
+
+    print("="*55)
+    if all_ok:
+        print("  ✅ All systems ready — run your pipeline cells")
+    else:
+        print("  ⚠  Some steps failed — check output above")
+        print("  Re-run individual step_*() functions to retry")
+    print("="*55 + "\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Patch: InsightFace mask_renderer import bug (Kaggle ABI issue)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def patch_insightface():
+    """
+    Patches insightface/app/__init__.py to skip mask_renderer import
+    which fails in Kaggle due to scipy/numpy ABI mismatch.
+    Only runs if insightface is installed and patch not already applied.
+    """
+    try:
+        import insightface
+        init_path = os.path.join(
+            os.path.dirname(insightface.__file__),
+            "app", "__init__.py"
+        )
+        if not os.path.isfile(init_path):
+            return
+
+        content = open(init_path).read()
+        if "mask_renderer" not in content:
+            return  # already clean or already patched
+        if "# PATCHED" in content:
+            return  # already patched this session
+
+        patched = content.replace(
+            "from .mask_renderer import MaskRenderer",
+            "# PATCHED: skip mask_renderer (ABI issue in Kaggle)\n"
+            "# from .mask_renderer import MaskRenderer"
+        )
+        open(init_path, "w").write(patched)
+        print("  ✓ InsightFace mask_renderer patch applied")
+    except Exception as e:
+        print(f"  ⚠ InsightFace patch skipped: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    t0 = time.time()
+    print("Person-Swap Kaggle Bootstrap")
+    print(f"Working dir: {WORK_DIR}")
+    print(f"Repo dir:    {REPO_DIR}")
+    print(f"Checkpoints: {CKPT_DIR}")
+    print(f"Externals:   {EXT_DIR}\n")
+
+    step_clone_repo()
+    step_clone_externals()
+    step_pip_install()
+    step_download_checkpoints()
+    step_wire_paths()
+    patch_insightface()
+    print_report()
+
+    elapsed = int(time.time() - t0)
+    print(f"Bootstrap completed in {elapsed}s\n")
+
+
+if __name__ == "__main__":
+    main()
+else:
+    # Also run when exec()'d from a notebook cell
+    main()
