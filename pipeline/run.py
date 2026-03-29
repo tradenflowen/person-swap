@@ -36,7 +36,8 @@ def run_pipeline(
     target_resolution=(1080, 1920),
     do_interpolation=False,
     use_simple_temporal=False,
-    skip_faceswap=False
+    skip_faceswap=False,
+    skip_bodyswap=False
 ):
     """
     Full person swap pipeline — runs all 7 stages in sequence
@@ -89,17 +90,21 @@ def run_pipeline(
     from pose import get_body_bbox
     face_bboxes = [get_body_bbox(kpts) for kpts in keypoints_seq]
 
-    # ── Stage 3: Body Swap ─────────────────────────────
-    print_stage(3, "Full Body Appearance Transfer (OOTDiffusion)")
-    from bodyswap import load_bodyswap_pipeline, process_video_bodyswap
+        # ── Stage 3: Body Swap ─────────────────────────────
+    if not skip_bodyswap:
+        print_stage(3, "Full Body Appearance Transfer (OOTDiffusion)")
+        from bodyswap import load_bodyswap_pipeline, process_video_bodyswap
 
-    body_pipe = load_bodyswap_pipeline()
-    body_frames = process_video_bodyswap(
-        frames, masks, pose_images,
-        reference_image_path, body_pipe
-    )
-    del body_pipe
-    free_vram()
+        body_pipe = load_bodyswap_pipeline()
+        body_frames = process_video_bodyswap(
+            frames, masks, pose_images,
+            reference_image_path, body_pipe
+        )
+        del body_pipe
+        free_vram()
+    else:
+        print_stage(3, "Body Swap SKIPPED (skip_bodyswap=True)")
+        body_frames = frames
 
     # ── Stage 4: Face Swap ─────────────────────────────
     if not skip_faceswap:
@@ -244,6 +249,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip InstantID face swap (saves VRAM)"
     )
+    parser.add_argument(
+        "--skip-bodyswap",
+        action="store_true",
+        help="Skip body swap stage (for debugging/incomplete setup)"
+    )
 
     args = parser.parse_args()
 
@@ -258,5 +268,6 @@ if __name__ == "__main__":
         target_resolution=(w, h),
         do_interpolation=args.interpolate,
         use_simple_temporal=args.simple_temporal,
-        skip_faceswap=args.skip_faceswap
+        skip_faceswap=args.skip_faceswap,
+        skip_bodyswap=args.skip_bodyswap
     )
