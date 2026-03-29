@@ -6,6 +6,7 @@ Run this as the FIRST cell in every new Kaggle session.
 What it does:
   1. Clones the person-swap repo
   2. Clones all external GitHub repos that provide pipeline Python code
+     (InstantID is fetched via wget instead of git clone — Kaggle blocks it)
   3. pip-installs all required packages
   4. Downloads all model checkpoints (skips if already present)
   5. Adds all required paths to sys.path
@@ -39,16 +40,13 @@ PERSON_SWAP_REPO = "https://github.com/tradenflowen/person-swap.git"
 # ── External GitHub repos needed for pipeline Python code ─────────────────────
 # Each entry: (clone_url, local_folder_name, subfolder_to_add_to_sys_path)
 # subfolder="" means add the root of the clone to sys.path
+# NOTE: InstantID is NOT listed here — Kaggle blocks its git clone.
+#       It is handled separately in step_fetch_instantid() via wget.
 EXTERNAL_REPOS = [
     (
         "https://github.com/facebookresearch/segment-anything-2.git",
         "sam2",
         ""          # sam2 package is at repo root
-    ),
-    (
-        "https://github.com/InstantX/InstantID.git",
-        "InstantID",
-        ""          # pipeline_stable_diffusion_xl_instantid.py is at root
     ),
     (
         "https://github.com/AIRI-Institute/HairFastGAN.git",
@@ -74,6 +72,31 @@ EXTERNAL_REPOS = [
         "https://github.com/hzwer/ECCV2022-RIFE.git",
         "RIFE",
         ""          # model/ is at root
+    ),
+]
+
+# ── InstantID files to fetch via wget (git clone blocked in Kaggle) ────────────
+# Each entry: (raw_github_url, local_filename_relative_to_InstantID_dir)
+INSTANTID_FILES = [
+    (
+        "https://raw.githubusercontent.com/InstantX/InstantID/main/pipeline_stable_diffusion_xl_instantid.py",
+        "pipeline_stable_diffusion_xl_instantid.py"
+    ),
+    (
+        "https://raw.githubusercontent.com/InstantX/InstantID/main/ip_adapter/__init__.py",
+        "ip_adapter/__init__.py"
+    ),
+    (
+        "https://raw.githubusercontent.com/InstantX/InstantID/main/ip_adapter/attention_processor.py",
+        "ip_adapter/attention_processor.py"
+    ),
+    (
+        "https://raw.githubusercontent.com/InstantX/InstantID/main/ip_adapter/ip_adapter.py",
+        "ip_adapter/ip_adapter.py"
+    ),
+    (
+        "https://raw.githubusercontent.com/InstantX/InstantID/main/ip_adapter/resampler.py",
+        "ip_adapter/resampler.py"
     ),
 ]
 
@@ -109,22 +132,24 @@ PIP_PACKAGES = [
 ]
 
 # ── Model checkpoints to download ─────────────────────────────────────────────
-# Each entry: (hf_repo_id, filename_or_None, local_subdir)
-# filename=None means snapshot_download (entire repo)
+# Entry formats:
+#   (None, url, filename)                      — direct URL download
+#   ("hf", repo_id, filename, subdir)          — HF single file
+#   ("hf_snapshot", repo_id, subdir)           — HF full repo snapshot
 CHECKPOINTS = [
-    # SAM2
+    # SAM2 checkpoint
     (
-        None,   # direct URL download, handled separately
+        None,
         "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_small.pt",
         "sam2_hiera_small.pt"
     ),
-    # MediaPipe pose — also a direct URL, handled separately
+    # MediaPipe pose model
     (
         None,
         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task",
         "pose_landmarker.task"
     ),
-    # InstantID
+    # InstantID weights (pipeline Python code fetched separately via wget)
     (
         "hf",
         "InstantX/InstantID",
@@ -143,24 +168,24 @@ CHECKPOINTS = [
         "ControlNetModel/diffusion_pytorch_model.safetensors",
         "instantid"
     ),
-    # HairFastGAN weights (snapshot — code comes from GitHub clone)
+    # HairFastGAN weights snapshot (Python code comes from GitHub clone)
     (
         "hf_snapshot",
         "AIRI-Institute/HairFastGAN",
         "hairfastgan"
     ),
-    # GPEN skin enhancer
+    # GPEN skin enhancer — corrected repo (akhaliq/GPEN is private/gone)
     (
         "hf",
-        "akhaliq/GPEN",
+        "TencentARC/GPEN",
         "GPEN-BFR-512.pth",
         "gpen"
     ),
-    # Real-ESRGAN
+    # Real-ESRGAN — corrected repo and file path
     (
         "hf",
-        "ai-forever/Real-ESRGAN",
-        "RealESRGAN_x4plus.pth",
+        "xinntao/Real-ESRGAN",
+        "experiments/pretrained_models/RealESRGAN_x4plus.pth",
         "realesrgan"
     ),
 ]
@@ -199,7 +224,7 @@ STATUS = {}   # populated at end for readiness report
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step_clone_repo():
-    print("\n[1/5] person-swap repo")
+    print("\n[1/6] person-swap repo")
     if os.path.isdir(REPO_DIR):
         print("  Already cloned — pulling latest...")
         run(f"git -C {REPO_DIR} pull --ff-only", "git pull")
@@ -224,7 +249,7 @@ def step_clone_repo():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step_clone_externals():
-    print("\n[2/5] External GitHub repos (pipeline code)")
+    print("\n[2/6] External GitHub repos (pipeline code)")
     os.makedirs(EXT_DIR, exist_ok=True)
 
     for entry in EXTERNAL_REPOS:
@@ -242,32 +267,64 @@ def step_clone_externals():
                 STATUS[f"ext_{folder}"] = False
                 continue
 
-        # Add to sys.path
+        # Add correct subpath to sys.path
         path_to_add = dest if subpath == "" else f"{dest}/{subpath}"
-        added = add_path(path_to_add)
+        add_path(path_to_add)
         STATUS[f"ext_{folder}"] = os.path.isdir(path_to_add)
         print(f"  ✓ {folder} → sys.path: {path_to_add}")
 
-    # OOTDiffusion needs its checkpoints subfolder wired into sys.path too
-    # so that `from pipelines.OOTDiffusion import ...` resolves
+    # OOTDiffusion root must also be in sys.path
+    # so that `from pipelines.OOTDiffusion import ...` resolves correctly
     ootd_pipe = f"{EXT_DIR}/OOTDiffusion"
     if os.path.isdir(ootd_pipe):
         add_path(ootd_pipe)
 
-    # InstantID pipeline file needs to be visible at top level
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — Fetch InstantID files via wget (git clone blocked in Kaggle)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step_fetch_instantid():
+    print("\n[3/6] InstantID pipeline files (wget — git clone blocked in Kaggle)")
     instantid_dir = f"{EXT_DIR}/InstantID"
-    if os.path.isdir(instantid_dir):
-        add_path(instantid_dir)
+    os.makedirs(instantid_dir, exist_ok=True)
+
+    all_ok = True
+    for raw_url, local_name in INSTANTID_FILES:
+        dest = f"{instantid_dir}/{local_name}"
+        dest_dir = os.path.dirname(dest)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        if os.path.isfile(dest):
+            print(f"  ✓ {local_name}: already present")
+            continue
+
+        ok = run(
+            f"wget -q {raw_url} -O {dest}",
+            f"wget {local_name}"
+        )
+        if ok:
+            print(f"  ✓ {local_name}: downloaded")
+        else:
+            print(f"  ✗ {local_name}: FAILED")
+            all_ok = False
+
+    add_path(instantid_dir)
+    STATUS["ext_InstantID"] = all_ok
+    if all_ok:
+        print(f"  ✓ InstantID → sys.path: {instantid_dir}")
+    else:
+        print(f"  ⚠ InstantID: some files failed — check above")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 3 — pip install
+# Step 4 — pip install
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step_pip_install():
-    print("\n[3/5] pip packages")
+    print("\n[4/6] pip packages")
 
-    # Install SAM2 from its cloned repo (not PyPI)
+    # Install SAM2 from its cloned repo (not on PyPI as a stable release)
     sam2_dir = f"{EXT_DIR}/sam2"
     if os.path.isdir(sam2_dir):
         run(
@@ -275,15 +332,9 @@ def step_pip_install():
             "pip install sam2 (from clone)"
         )
 
-    # Install OOTDiffusion requirements if present
-    ootd_req = f"{EXT_DIR}/OOTDiffusion/requirements.txt"
-    if os.path.isfile(ootd_req):
-        run(f"pip install -r {ootd_req} -q", "OOTDiffusion requirements")
-
-    # Install HairFastGAN requirements if present
-    hair_req = f"{EXT_DIR}/HairFastGAN/requirements.txt"
-    if os.path.isfile(hair_req):
-        run(f"pip install -r {hair_req} -q", "HairFastGAN requirements")
+    # OOTDiffusion and HairFastGAN requirements.txt are intentionally skipped:
+    # they contain broken/incompatible pinned versions that fail on Kaggle.
+    # All functionally required packages are covered in PIP_PACKAGES below.
 
     # Main package list
     pkg_str = " ".join(f'"{p}"' for p in PIP_PACKAGES)
@@ -294,11 +345,11 @@ def step_pip_install():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 4 — Download checkpoints
+# Step 5 — Download checkpoints
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step_download_checkpoints():
-    print("\n[4/5] Model checkpoints")
+    print("\n[5/6] Model checkpoints")
     import urllib.request
     try:
         from huggingface_hub import hf_hub_download, snapshot_download
@@ -327,9 +378,11 @@ def step_download_checkpoints():
         elif kind == "hf":
             _, repo_id, filename, subdir = entry
             dest_dir = f"{CKPT_DIR}/{subdir}"
-            dest_file = f"{dest_dir}/{filename}"
+            # Check by basename so nested paths (e.g. experiments/pretrained_models/x.pth)
+            # don't cause false "not present" on re-runs
+            dest_file = f"{dest_dir}/{os.path.basename(filename)}"
             if os.path.isfile(dest_file):
-                print(f"  ✓ {filename}: already present")
+                print(f"  ✓ {os.path.basename(filename)}: already present")
                 continue
             os.makedirs(dest_dir, exist_ok=True)
             print(f"  Downloading {filename} from {repo_id}...")
@@ -339,7 +392,7 @@ def step_download_checkpoints():
                     filename=filename,
                     local_dir=dest_dir
                 )
-                print(f"  ✓ {filename}: downloaded")
+                print(f"  ✓ {os.path.basename(filename)}: downloaded")
             except Exception as e:
                 print(f"  ✗ {filename}: FAILED — {e}")
 
@@ -363,15 +416,15 @@ def step_download_checkpoints():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 5 — Wire sys.path for pipeline modules
+# Step 6 — Wire sys.path for all pipeline modules
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step_wire_paths():
     """
     Ensures all import paths are set correctly for the pipeline.
-    Run this again if you restart the kernel without re-running the full setup.
+    Safe to call again after a kernel restart without re-running full setup.
     """
-    print("\n[5/5] Wiring sys.path")
+    print("\n[6/6] Wiring sys.path")
 
     paths = [
         REPO_DIR,
@@ -383,9 +436,9 @@ def step_wire_paths():
         f"{EXT_DIR}/RAFT/core",
         f"{EXT_DIR}/ProPainter",
         f"{EXT_DIR}/RIFE",
-        # HairFastGAN weights snapshot path (for pretrained_models/)
+        # HairFastGAN weights snapshot (pretrained_models/ lives here)
         f"{CKPT_DIR}/hairfastgan",
-        # GPEN code path
+        # GPEN inference code (face_enhancement.py expected here)
         f"{CKPT_DIR}/gpen",
     ]
 
@@ -400,6 +453,42 @@ def step_wire_paths():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Patch: InsightFace mask_renderer import bug (Kaggle ABI issue)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def patch_insightface():
+    """
+    Patches insightface/app/__init__.py to skip mask_renderer import
+    which fails in Kaggle due to scipy/numpy ABI mismatch.
+    Only runs if insightface is installed and patch not already applied.
+    """
+    try:
+        import insightface
+        init_path = os.path.join(
+            os.path.dirname(insightface.__file__),
+            "app", "__init__.py"
+        )
+        if not os.path.isfile(init_path):
+            return
+
+        content = open(init_path).read()
+        if "mask_renderer" not in content:
+            return  # already clean
+        if "# PATCHED" in content:
+            return  # already patched this session
+
+        patched = content.replace(
+            "from .mask_renderer import MaskRenderer",
+            "# PATCHED: skip mask_renderer (ABI issue in Kaggle)\n"
+            "# from .mask_renderer import MaskRenderer"
+        )
+        open(init_path, "w").write(patched)
+        print("  ✓ InsightFace mask_renderer patch applied")
+    except Exception as e:
+        print(f"  ⚠ InsightFace patch skipped: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Readiness report
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -411,7 +500,7 @@ def print_report():
     checks = [
         ("person-swap repo",    STATUS.get("repo", False)),
         ("SAM2 clone",          STATUS.get("ext_sam2", False)),
-        ("InstantID clone",     STATUS.get("ext_InstantID", False)),
+        ("InstantID files",     STATUS.get("ext_InstantID", False)),
         ("HairFastGAN clone",   STATUS.get("ext_HairFastGAN", False)),
         ("OOTDiffusion clone",  STATUS.get("ext_OOTDiffusion", False)),
         ("RAFT clone",          STATUS.get("ext_RAFT", False)),
@@ -439,42 +528,6 @@ def print_report():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Patch: InsightFace mask_renderer import bug (Kaggle ABI issue)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def patch_insightface():
-    """
-    Patches insightface/app/__init__.py to skip mask_renderer import
-    which fails in Kaggle due to scipy/numpy ABI mismatch.
-    Only runs if insightface is installed and patch not already applied.
-    """
-    try:
-        import insightface
-        init_path = os.path.join(
-            os.path.dirname(insightface.__file__),
-            "app", "__init__.py"
-        )
-        if not os.path.isfile(init_path):
-            return
-
-        content = open(init_path).read()
-        if "mask_renderer" not in content:
-            return  # already clean or already patched
-        if "# PATCHED" in content:
-            return  # already patched this session
-
-        patched = content.replace(
-            "from .mask_renderer import MaskRenderer",
-            "# PATCHED: skip mask_renderer (ABI issue in Kaggle)\n"
-            "# from .mask_renderer import MaskRenderer"
-        )
-        open(init_path, "w").write(patched)
-        print("  ✓ InsightFace mask_renderer patch applied")
-    except Exception as e:
-        print(f"  ⚠ InsightFace patch skipped: {e}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -488,6 +541,7 @@ def main():
 
     step_clone_repo()
     step_clone_externals()
+    step_fetch_instantid()       # new step — wget fallback for InstantID
     step_pip_install()
     step_download_checkpoints()
     step_wire_paths()
