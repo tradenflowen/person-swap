@@ -47,12 +47,11 @@ def load_hair_pipeline():
 
 def load_skin_enhancer():
     """
-    Load GPEN skin enhancement model
-    Fixes skin texture after face/body swap artifacts
+    Prepare GPEN for face enhancement
+    GPEN runs as a CLI tool, not importable Python class
     """
-    import sys
+    import subprocess
     
-    # GPEN repo is already in sys.path from bootstrap
     gpen_path = "/kaggle/working/external/GPEN"
     checkpoint_path = "./checkpoints/gpen/GPEN-BFR-512.pth"
     
@@ -60,25 +59,11 @@ def load_skin_enhancer():
         print("⚠ GPEN checkpoint not found - skipping skin enhancement")
         return None
     
-    # Import from GPEN repo
-    sys.path.insert(0, gpen_path)
-    from face_model.face_gan import FaceGAN
-    
-    enhancer = FaceGAN(
-        base_dir=gpen_path,
-        size=512,
-        model='GPEN-BFR-512',
-        channel_multiplier=2,
-        narrow=1,
-        device='cuda' if torch.cuda.is_available() else 'cpu'
-    )
-    
-    # Load checkpoint
-    enhancer.load_state_dict(torch.load(checkpoint_path))
-    enhancer.eval()
-    
-    print("✓ GPEN skin enhancer loaded")
-    return enhancer
+    print("✓ GPEN ready (will run via CLI)")
+    return {
+        "gpen_path": gpen_path,
+        "checkpoint": checkpoint_path
+    }
 
 def segment_hair_region(frame_rgb, face_bbox):
     """
@@ -139,27 +124,50 @@ def transfer_hair(
         return source_frame_rgb
 
 
-def enhance_skin(enhancer, frame_rgb):
+def enhance_skin(enhancer_config, frame_rgb):
     """
-    Run GPEN skin enhancement to fix artifacts
-    after face and body swap operations
-    Smooths skin, fixes boundary artifacts, enhances realism
+    Run GPEN skin enhancement via CLI
     """
-    if enhancer is None:
+    if enhancer_config is None:
         return frame_rgb
-        
+    
     try:
-        # Convert to tensor
-        frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1).unsqueeze(0).float() / 255.0
-        frame_tensor = frame_tensor.to(enhancer.device)
+        import subprocess
+        import tempfile
         
-        with torch.no_grad():
-            enhanced_tensor = enhancer(frame_tensor)
+        # Save frame to temp file
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_in:
+            input_path = tmp_in.name
+            Image.fromarray(frame_rgb).save(input_path)
         
-        enhanced_rgb = (enhanced_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_out:
+            output_path = tmp_out.name
+        
+        # Run GPEN CLI
+        cmd = [
+            "python",
+            f"{enhancer_config['gpen_path']}/face_enhancement.py",
+            "--model", "GPEN-BFR-512",
+            "--in_size", "512",
+            "--channel_multiplier", "2",
+            "--narrow", "1",
+            "--indir", os.path.dirname(input_path),
+            "--outdir", os.path.dirname(output_path)
+        ]
+        
+        subprocess.run(cmd, check=True, capture_output=True)
+        
+        # Load result
+        enhanced_rgb = np.array(Image.open(output_path).convert("RGB"))
+        
+        # Cleanup
+        os.unlink(input_path)
+        os.unlink(output_path)
+        
         return enhanced_rgb
+        
     except Exception as e:
-        print(f"⚠ Skin enhancement failed: {e}")
+        print(f"⚠ GPEN enhancement failed: {e}")
         return frame_rgb
 
 def blend_hair_result(

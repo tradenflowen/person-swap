@@ -111,6 +111,30 @@ PIP_PACKAGES = [
     "timm",
 ]
 
+
+INSTANTID_FILES = [
+    (
+        "https://raw.githubusercontent.com/instantX-research/InstantID/main/pipeline_stable_diffusion_xl_instantid.py",
+        "pipeline_stable_diffusion_xl_instantid.py"
+    ),
+    (
+        "https://raw.githubusercontent.com/instantX-research/InstantID/main/ip_adapter/__init__.py",
+        "ip_adapter/__init__.py"
+    ),
+    (
+        "https://raw.githubusercontent.com/instantX-research/InstantID/main/ip_adapter/attention_processor.py",
+        "ip_adapter/attention_processor.py"
+    ),
+    (
+        "https://raw.githubusercontent.com/instantX-research/InstantID/main/ip_adapter/ip_adapter.py",
+        "ip_adapter/ip_adapter.py"
+    ),
+    (
+        "https://raw.githubusercontent.com/instantX-research/InstantID/main/ip_adapter/resampler.py",
+        "ip_adapter/resampler.py"
+    ),
+]
+
 # ── Model checkpoints to download ─────────────────────────────────────────────
 # Entry formats:
 #   (None, url, filename)                      — direct URL download
