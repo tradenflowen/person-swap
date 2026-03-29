@@ -9,14 +9,23 @@ from PIL import Image
 
 def load_sam2():
     """Load SAM 2 model — downloads once, cached after that"""
+    import os
+    import urllib.request
     from sam2.build_sam import build_sam2
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-    # Use the smaller/faster model first for testing
-    model = build_sam2(
-        "sam2_hiera_small.yaml",
-        "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_small.pt"
-    )
+    ckpt_dir = "./checkpoints"
+    os.makedirs(ckpt_dir, exist_ok=True)
+    ckpt_path = os.path.join(ckpt_dir, "sam2_hiera_small.pt")
+
+    if not os.path.exists(ckpt_path):
+        print("Downloading SAM2 checkpoint...")
+        urllib.request.urlretrieve(
+            "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_small.pt",
+            ckpt_path
+        )
+
+    model = build_sam2("sam2_hiera_s.yaml", ckpt_path)
     predictor = SAM2ImagePredictor(model)
     print("✓ SAM 2 loaded")
     return predictor
@@ -72,7 +81,7 @@ def extract_frames(video_path, max_frames=50):
     return frames, fps
 
 
-def segment_video(video_path):
+def segment_video(video_path, max_frames=50):
     """
     Main function — takes video path, returns list of masks per frame
     """
@@ -80,7 +89,7 @@ def segment_video(video_path):
     predictor = load_sam2()
 
     print("Extracting frames...")
-    frames, fps = extract_frames(video_path)
+    frames, fps = extract_frames(video_path, max_frames=max_frames)
 
     print("Generating masks...")
     masks = []
