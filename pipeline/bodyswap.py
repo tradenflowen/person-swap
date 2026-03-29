@@ -9,6 +9,14 @@ import numpy as np
 import cv2
 from PIL import Image
 
+# ═══════════════════════════════════════════════════════════════════════════
+# NOTE: OOTDiffusion is for virtual clothing try-on, NOT full body person swap.
+# This stage is currently disabled in the pipeline.
+# Body swap requires a different approach - deferred to future iteration.
+# ═══════════════════════════════════════════════════════════════════════════
+
+BODY_SWAP_ENABLED = False  # Set to True when proper solution implemented
+
 def load_bodyswap_pipeline():
     """
     Load OOTDiffusion pipeline
@@ -147,13 +155,15 @@ def process_video_bodyswap(
 ):
     """
     Main function — applies full body swap across all video frames
-
-    frames: RGB frames from segment.py
-    masks: body masks from segment.py
-    pose_images: skeleton images from pose.py
-    reference_image_path: full body photo of target person
-    batch_size: process N frames at once for speed
+    
+    NOTE: Currently disabled - OOTDiffusion is wrong tool for this task.
+    Returns input frames unchanged.
     """
+    if not BODY_SWAP_ENABLED:
+        print("⚠ Body swap stage disabled - passing frames through unchanged")
+        print("  (OOTDiffusion is for clothing try-on, not person swap)")
+        return frames
+    
     # Load target reference image
     print("Loading target reference image...")
     target_rgb = np.array(

@@ -26,50 +26,59 @@ def load_hair_pipeline():
         local_dir="./checkpoints/hairfastgan"
     )
 
-    # Add HairFastGAN to path
-    sys.path.append(model_path)
-    from hair_swap import HairFast, get_parser
-
-    parser = get_parser()
-    args = parser.parse_args([])
+    # HairFastGAN is already in sys.path from bootstrap
+    # Import from correct module structure
+    from models.HairFast import HairFast
+    from options.train_options import TrainOptions
+    
+    parser = TrainOptions()
+    args = parser.parse()
+    
+    # Override args for inference
     args.device = device
-    args.model_dir = f"{model_path}/pretrained_models"
+    args.latent_path = f"{model_path}/latent_code_base.npy"
+    args.ckpt = f"{model_path}/ckpt/base.pt"
 
     hair_fast = HairFast(args)
+    hair_fast.model.eval()
+    
     print("✓ HairFastGAN loaded")
     return hair_fast, device
-
 
 def load_skin_enhancer():
     """
     Load GPEN skin enhancement model
     Fixes skin texture after face/body swap artifacts
     """
-    from huggingface_hub import hf_hub_download
     import sys
-
-    model_path = hf_hub_download(
-        repo_id="akhaliq/GPEN",
-        filename="GPEN-BFR-512.pth",
-        local_dir="./checkpoints/gpen"
-    )
-
-    # Load GPEN
-    sys.path.append("./checkpoints/gpen")
-    from face_enhancement import FaceEnhancement
-
-    enhancer = FaceEnhancement(
+    
+    # GPEN repo is already in sys.path from bootstrap
+    gpen_path = "/kaggle/working/external/GPEN"
+    checkpoint_path = "./checkpoints/gpen/GPEN-BFR-512.pth"
+    
+    if not os.path.exists(checkpoint_path):
+        print("⚠ GPEN checkpoint not found - skipping skin enhancement")
+        return None
+    
+    # Import from GPEN repo
+    sys.path.insert(0, gpen_path)
+    from face_model.face_gan import FaceGAN
+    
+    enhancer = FaceGAN(
+        base_dir=gpen_path,
         size=512,
-        model="GPEN-BFR-512",
-        use_sr=False,
-        sr_model=None,
+        model='GPEN-BFR-512',
         channel_multiplier=2,
         narrow=1,
-        base_dir="./checkpoints/gpen"
+        device='cuda' if torch.cuda.is_available() else 'cpu'
     )
+    
+    # Load checkpoint
+    enhancer.load_state_dict(torch.load(checkpoint_path))
+    enhancer.eval()
+    
     print("✓ GPEN skin enhancer loaded")
     return enhancer
-
 
 def segment_hair_region(frame_rgb, face_bbox):
     """
@@ -136,16 +145,22 @@ def enhance_skin(enhancer, frame_rgb):
     after face and body swap operations
     Smooths skin, fixes boundary artifacts, enhances realism
     """
+    if enhancer is None:
+        return frame_rgb
+        
     try:
-        # GPEN expects BGR
-        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-        enhanced_bgr, _ = enhancer.process(frame_bgr, frame_bgr)
-        enhanced_rgb = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
+        # Convert to tensor
+        frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+        frame_tensor = frame_tensor.to(enhancer.device)
+        
+        with torch.no_grad():
+            enhanced_tensor = enhancer(frame_tensor)
+        
+        enhanced_rgb = (enhanced_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
         return enhanced_rgb
     except Exception as e:
         print(f"⚠ Skin enhancement failed: {e}")
         return frame_rgb
-
 
 def blend_hair_result(
     swapped_frame,

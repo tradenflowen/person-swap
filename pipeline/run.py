@@ -37,7 +37,7 @@ def run_pipeline(
     do_interpolation=False,
     use_simple_temporal=False,
     skip_faceswap=False,
-    skip_bodyswap=False
+    skip_bodyswap=True
 ):
     """
     Full person swap pipeline — runs all 7 stages in sequence

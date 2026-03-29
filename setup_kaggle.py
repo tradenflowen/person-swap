@@ -73,30 +73,10 @@ EXTERNAL_REPOS = [
         "RIFE",
         ""          # model/ is at root
     ),
-]
-
-# ── InstantID files to fetch via wget (git clone blocked in Kaggle) ────────────
-# Each entry: (raw_github_url, local_filename_relative_to_InstantID_dir)
-INSTANTID_FILES = [
-    (
-        "https://raw.githubusercontent.com/InstantX/InstantID/main/pipeline_stable_diffusion_xl_instantid.py",
-        "pipeline_stable_diffusion_xl_instantid.py"
-    ),
-    (
-        "https://raw.githubusercontent.com/InstantX/InstantID/main/ip_adapter/__init__.py",
-        "ip_adapter/__init__.py"
-    ),
-    (
-        "https://raw.githubusercontent.com/InstantX/InstantID/main/ip_adapter/attention_processor.py",
-        "ip_adapter/attention_processor.py"
-    ),
-    (
-        "https://raw.githubusercontent.com/InstantX/InstantID/main/ip_adapter/ip_adapter.py",
-        "ip_adapter/ip_adapter.py"
-    ),
-    (
-        "https://raw.githubusercontent.com/InstantX/InstantID/main/ip_adapter/resampler.py",
-        "ip_adapter/resampler.py"
+     (
+        "https://github.com/yangxy/GPEN.git",
+        "GPEN",
+        ""          # ADD THIS - needed for skin enhancement
     ),
 ]
 
@@ -174,20 +154,19 @@ CHECKPOINTS = [
         "AIRI-Institute/HairFastGAN",
         "hairfastgan"
     ),
-    # GPEN skin enhancer — corrected repo (akhaliq/GPEN is private/gone)
+        # GPEN skin enhancer — use correct repo URL
     (
-        "hf",
-        "TencentARC/GPEN",
-        "GPEN-BFR-512.pth",
-        "gpen"
+        None,  # CHANGE from "hf" to None - direct download
+        "https://github.com/yangxy/GPEN/releases/download/v1.0/GPEN-BFR-512.pth",
+        "gpen/GPEN-BFR-512.pth"
     ),
-    # Real-ESRGAN — corrected repo and file path
+        # Real-ESRGAN — use direct GitHub release URL
     (
-        "hf",
-        "xinntao/Real-ESRGAN",
-        "experiments/pretrained_models/RealESRGAN_x4plus.pth",
-        "realesrgan"
+        None,  # CHANGE from "hf" to None
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        "realesrgan/RealESRGAN_x4plus.pth"
     ),
+
 ]
 
 
@@ -283,38 +262,6 @@ def step_clone_externals():
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 3 — Fetch InstantID files via wget (git clone blocked in Kaggle)
 # ══════════════════════════════════════════════════════════════════════════════
-
-def step_fetch_instantid():
-    print("\n[3/6] InstantID pipeline files (wget — git clone blocked in Kaggle)")
-    instantid_dir = f"{EXT_DIR}/InstantID"
-    os.makedirs(instantid_dir, exist_ok=True)
-
-    all_ok = True
-    for raw_url, local_name in INSTANTID_FILES:
-        dest = f"{instantid_dir}/{local_name}"
-        dest_dir = os.path.dirname(dest)
-        os.makedirs(dest_dir, exist_ok=True)
-
-        if os.path.isfile(dest):
-            print(f"  ✓ {local_name}: already present")
-            continue
-
-        ok = run(
-            f"wget -q {raw_url} -O {dest}",
-            f"wget {local_name}"
-        )
-        if ok:
-            print(f"  ✓ {local_name}: downloaded")
-        else:
-            print(f"  ✗ {local_name}: FAILED")
-            all_ok = False
-
-    add_path(instantid_dir)
-    STATUS["ext_InstantID"] = all_ok
-    if all_ok:
-        print(f"  ✓ InstantID → sys.path: {instantid_dir}")
-    else:
-        print(f"  ⚠ InstantID: some files failed — check above")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -429,16 +376,15 @@ def step_wire_paths():
     paths = [
         REPO_DIR,
         f"{REPO_DIR}/pipeline",
+        f"{REPO_DIR}/external_code/InstantID",  # ADD THIS - InstantID from repo
         f"{EXT_DIR}/sam2",
-        f"{EXT_DIR}/InstantID",
         f"{EXT_DIR}/HairFastGAN",
         f"{EXT_DIR}/OOTDiffusion",
         f"{EXT_DIR}/RAFT/core",
         f"{EXT_DIR}/ProPainter",
         f"{EXT_DIR}/RIFE",
-        # HairFastGAN weights snapshot (pretrained_models/ lives here)
+        f"{EXT_DIR}/GPEN",           # ADD THIS
         f"{CKPT_DIR}/hairfastgan",
-        # GPEN inference code (face_enhancement.py expected here)
         f"{CKPT_DIR}/gpen",
     ]
 
@@ -541,7 +487,6 @@ def main():
 
     step_clone_repo()
     step_clone_externals()
-    step_fetch_instantid()       # new step — wget fallback for InstantID
     step_pip_install()
     step_download_checkpoints()
     step_wire_paths()
